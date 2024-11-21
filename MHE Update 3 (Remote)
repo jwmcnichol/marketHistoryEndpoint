@@ -1,0 +1,227 @@
+import pandas as pd
+import requests
+from datetime import datetime
+import os
+import importlib
+import pyodbc
+import type_id_lists
+
+
+# db_server = 'localhost'
+# db_database = 'eve.SEDmount.full.07192024'
+# db_table = 'marketReportInclusionFilterDBTest'
+
+
+def market_history_main():
+    retrieve_history_data(jita)
+
+
+def function_select(function):
+    if function in functions_menu_list:
+        result = functions_menu_list[function]()
+        return result
+    else:
+        return "Brrt."
+
+
+def fetch_type_ids_from_db(server, database, query):
+    conn_str = (
+        f"Driver={{ODBC Driver 17 for SQL Server}};"
+        f"Server={server};"
+        f"Database={database};"
+        f"Trusted_Connection=yes;"
+    )
+    try:
+        with pyodbc.connect(conn_str) as conn:
+            df = pd.read_sql(query, conn)
+            return df['typeID'].tolist()
+    except Exception as e:
+        print(f"i sleep: {e}")
+        return []
+
+
+# def load_remote_data_structure(module_name):
+#     module = importlib.import_module(module_name)
+#     return module.long_list
+
+
+dev_path = ''
+prod_path = 'C:/Users/jwmcn/OneDrive/Eve Current/production'
+selected_regions = {
+    10000002: "The Forge",
+    10000043: "Domain",
+    10000064: "Essence",
+    10000030: "Heimatar",
+    10000032: "Sinq Laison",
+    10000042: "Metropolis",
+}
+jita_dict = {10000002: "The Forge"}  # fix this name
+jita = {10000002: 'JITA'}
+trit = [34, 35]
+
+
+def get_multiple_market_histories(type_ids, region_id):
+    counter = 0
+    print(type_ids, region_id)
+    print("warning selected regions list may be corrupt, double check dict entries")
+    histories = {}
+    for type_id in type_ids:
+        counter = counter + 1
+        print(type_id, region_id, counter, "of", len(type_ids))
+        try:
+            histories[type_id] = get_market_history(type_id, region_id)
+        except requests.HTTPError as e:
+            print(f"Failed to fetch data for type ID {type_id}: {e}")
+    return histories
+
+
+navy_query_config = [
+        """SELECT typeID  FROM [eve.SDEmount.full.09202024].[dbo].[publishedShips0924] 
+            where marketGroupName like 'Navy Faction'""",
+        'localhost',
+        'eve.SDEmount.full.09202024',
+        'publishedShips0924'
+    ]
+
+
+def types_list_config():
+    for key, value in types_menu_list.items():
+        print(f"{key}: {value}")
+    list_config_choice = input('Choose list source: ')
+    selected_result = types_list_select(list_config_choice)
+    return selected_result
+
+
+def get_query_config():
+    print(config_list)
+    query_config_name = input('enter name of query config: ')
+    return query_config_name
+
+
+def query_list_from_db():
+    query_config = navy_query_config # configure for input - display from remote store and get user entry
+    queried_list = fetch_type_ids_from_db(query_config[1], query_config[2], query_config[0])
+    print('queried list = ', queried_list)
+    split_queried_list = split_list(queried_list, 499)
+    return split_queried_list
+
+
+def get_market_history(type_id, region_id=10000002):
+    url = f"https://esi.evetech.net/latest/markets/{region_id}/history/?type_id={type_id}"
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
+def process_market_data(histories, region):
+    all_data = []
+    for type_id, history in histories.items():
+        for entry in history:
+            entry['type_id'] = type_id
+            all_data.append(entry)
+    df = pd.DataFrame(all_data)
+    df['Region'] = region
+    write_csv(df)
+    return df
+
+
+def split_list(input_list, segment_size):
+    if segment_size <= 0:
+        raise ValueError("must be positive.")
+    output = [input_list[i:i + segment_size] for i in range(0, len(input_list), segment_size)]
+    # print(output)
+    print('split', input_list)
+    return output
+
+
+def local_list_config():
+    print('configure local typeid list...')
+    import inspect
+    lists_in_type_id_lists = {
+        name: value for name, value in inspect.getmembers(type_id_lists)
+        if isinstance(value, list)
+    }
+    if not lists_in_type_id_lists:
+        print("no lists found")
+        return None
+    print("Available lists: ")
+    for i, list_name in enumerate(lists_in_type_id_lists.keys(), 1):
+        print(f"{i}. {list_name}")
+    while True:
+        try:
+            choice = int(input("Enter number of list:  "))
+            if 1 <= choice <= len(lists_in_type_id_lists):
+                selected_list_name = list(lists_in_type_id_lists.keys())[choice - 1]
+                selected_list = lists_in_type_id_lists[selected_list_name]
+                print(f"Picked: {selected_list_name}")
+                formatted_list = split_list(selected_list, 499)
+                print('formatted', selected_list)
+                return formatted_list
+            else:
+                print("Invalid selection. Please choose a number from the list.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+
+def retrieve_history_data(regions_group):
+    selected_regions_list = []
+    for key, value in regions_group.items():
+        print(key, "selected")
+        selected_regions_list.append(key)
+    start_time = datetime.now()
+    counter = 0
+    formatted_list = types_list_config()
+    print(formatted_list, 'is formatted list')
+    master_df = pd.DataFrame()
+    for region in selected_regions_list:
+        for type_list in formatted_list:
+            region_history = get_multiple_market_histories(type_list,
+                                                           region)  # get histories for multiple items per region
+            loop_df = process_market_data(region_history, region)
+            master_df = pd.concat([master_df, loop_df], ignore_index=True)
+            counter = counter + 1
+            print(counter, "of", len(selected_regions_list))
+            end_time = datetime.now()
+            print(end_time - start_time)
+    # master_df.to_csv('allShips.csv', index=False)
+    write_csv(master_df)
+
+
+def write_csv(df):
+    directory_path = 'C:/Users/jwmcn/Downloads/'
+    file_name = get_file_name()
+    file_path = os.path.join(directory_path, file_name)
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            print('deketed old file')
+        except OSError as e:
+            print(f"Error deleting {file_name}: {e}")
+    csv_file_path = file_path
+    df.to_csv(csv_file_path, index=False)
+    print("dataframe completed")
+    print("dataframe parsed")
+    print("wrote csv to disk")
+    print("locatiom =", csv_file_path)
+    return
+
+
+def get_file_name():
+    file_name_string = input('Enter file name with extension: ')
+    return file_name_string
+
+
+types_menu_list = {
+    '1': local_list_config,
+    '2': query_list_from_db  # FIGURE OUT WHERE THIS GETS PASSED FROM!!!!
+}
+
+def types_list_select(types_menu_list_choice):
+    if types_menu_list_choice in types_menu_list:
+        result = types_menu_list[types_menu_list_choice]()
+        return result
+    else:
+        return "Brrt."
+
+
+market_history_main()
